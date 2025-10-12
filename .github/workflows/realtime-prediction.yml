@@ -78,11 +78,14 @@ jobs:
     steps:
       - name: Checkout Full History
         uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
+        with:
+          fetch-depth: 0
+
       - name: Set up Python
         uses: actions/setup-python@v4
-        with: { python-version: '3.10' }
-      
+        with:
+          python-version: '3.10'
+
       - name: Cache Dependencies
         uses: actions/cache@v4
         with:
@@ -93,19 +96,25 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          # FIXED: Using the correct path to your requirements file
           pip install -r scripts/requirements.txt
           sudo apt-get update && sudo apt-get install -y cloc jq
-          
+
       - name: Run GenAI Model Prediction
         id: predict_step
         env:
           PREDICTION_API_URL: ${{ secrets.GEN_AI_API_URL }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          echo "Calling GenAI prediction API: $PREDICTION_API_URL"
           python scripts/predict_realtime.py
+
+          if [ ! -f prediction.txt ]; then
+            echo "❌ prediction.txt not found! The prediction likely failed." >&2
+            exit 1
+          fi
+
           echo "result=$(cat prediction.txt)" >> "$GITHUB_OUTPUT"
-          
+
       - name: Archive Payload for Tracking
         uses: actions/upload-artifact@v4
         with:
@@ -146,9 +155,12 @@ jobs:
           if [ "$SHOULD_PREDICT" == "false" ]; then
             BODY="✅ **Trivial Change Detected**"$'\n\n'"No code files were modified. Skipping build failure prediction."
           else
-            BODY="**Build Failure Prediction Results**"$'\n\n'"- 🤖 ML Model: \`${ML_PREDICTION:-Error}\`"$'\n'"- 🧠 GenAI Model: \`${GEN_AI_PREDICTION:-Error}\`"
-            if [ "$ML_PREDICTION" == "Fail" ]; then
-              BODY+="$'\n\n'**ML Model Explanation**: _${AI_EXPLANATION:-Unable to get explanation from the GenAI model.}_"
+            ML_RESULT="${{ needs.predict_ml_model.outputs.prediction }}"
+            AI_RESULT="${{ needs.predict_gen_ai.outputs.prediction }}"
+            BODY="**Build Failure Prediction Results**"$'\n\n'"- 🤖 ML Model: \`${ML_RESULT:-Error}\`"$'\n'"- 🧠 GenAI Model: \`${AI_RESULT:-Error}\`"
+            if [ "$ML_RESULT" == "Fail" ]; then
+              EXPLANATION="${{ steps.get_explanation.outputs.explanation }}"
+              BODY+="$'\n\n'"**AI Explanation**: _${AI_EXPLANATION:-Unable to get explanation from the GenAI model.}_"
             fi
           fi
 
