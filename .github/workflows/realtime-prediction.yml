@@ -146,15 +146,13 @@ jobs:
           if [ "$SHOULD_PREDICT" == "false" ]; then
             BODY="✅ **Trivial Change Detected**"$'\n\n'"No code files were modified. Skipping build failure prediction."
           else
-            ML_RESULT="${{ needs.predict_ml_model.outputs.prediction }}"
-            AI_RESULT="${{ needs.predict_gen_ai.outputs.prediction }}"
-            BODY="**Build Failure Prediction Results**"$'\n\n'"- 🤖 ML Model: \`${ML_RESULT:-Error}\`"$'\n'"- 🧠 GenAI Model: \`${AI_RESULT:-Error}\`"
-            if [ "$ML_RESULT" == "Fail" ]; then
-              EXPLANATION="${{ steps.get_explanation.outputs.explanation }}"
-              BODY+="$'\n\n'"**AI Explanation**: _${AI_EXPLANATION:-Unable to get explanation from the GenAI model.}_"
+            BODY="**Build Failure Prediction Results**"$'\n\n'"- 🤖 ML Model: \`${ML_PREDICTION:-Error}\`"$'\n'"- 🧠 GenAI Model: \`${GEN_AI_PREDICTION:-Error}\`"
+            if [ "$ML_PREDICTION" == "Fail" ]; then
+              BODY+="$'\n\n'**ML Model Explanation**: _${AI_EXPLANATION:-Unable to get explanation from the GenAI model.}_"
             fi
           fi
-          echo 'BODY_CONTENT'<<'EOF' >> $GITHUB_ENV
+
+          echo 'BODY_CONTENT<<EOF' >> $GITHUB_ENV
           echo "$BODY" >> $GITHUB_ENV
           echo 'EOF' >> $GITHUB_ENV
 
