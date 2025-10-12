@@ -3,28 +3,32 @@ name: "Build Failure Prediction"
 on: [push]
 
 jobs:
-  # JOB 1: Check if the changes are worth predicting
+  # JOB 1: Check for meaningful code changes
   check_changes:
     runs-on: ubuntu-latest
     outputs:
       should_predict: ${{ steps.check_files.outputs.should_predict }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Code
+        uses: actions/checkout@v4
         with: { fetch-depth: 2 }
 
-      - name: "Check for Code Changes"
+      - name: Check for Code Changes
         id: check_files
         run: |
           CHANGED_FILES=$(git diff --name-only HEAD~1 HEAD)
+          # Regex to find common source code file extensions
           CODE_EXTENSIONS_REGEX="\.(java|xml|properties|yml|yaml|pom)$"
           
           if echo "$CHANGED_FILES" | grep -qE "$CODE_EXTENSIONS_REGEX"; then
+            echo "Code files were changed. Prediction is required."
             echo "should_predict=true" >> "$GITHUB_OUTPUT"
           else
+            echo "No code files changed. Skipping prediction."
             echo "should_predict=false" >> "$GITHUB_OUTPUT"
           fi
 
-  # JOB 2 & 3 (Parallel): Run Predictions
+  # JOB 2: Predict using the Machine Learning model
   predict_ml_model:
     runs-on: ubuntu-latest
     needs: check_changes
@@ -32,48 +36,61 @@ jobs:
     outputs:
       prediction: ${{ steps.predict_step.outputs.result }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v4
+      - name: Checkout Full History
+        uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with: { python-version: '3.10' }
-      - run: pip install pandas requests numpy
-      - name: "Run ML Model Prediction"
+      - name: Install Dependencies
+        run: |
+          pip install pandas requests numpy
+          sudo apt-get update && sudo apt-get install -y cloc jq
+      - name: Run ML Model Prediction
         id: predict_step
         env:
           PREDICTION_API_URL: ${{ secrets.PREDICTION_API_URL }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python scripts/predict_realtime.py
-          echo "result=$(cat payload.json | jq -r .prediction)" >> "$GITHUB_OUTPUT"
-      - name: "Archive Payload for Tracking"
+          echo "result=$(cat prediction.txt)" >> "$GITHUB_OUTPUT"
+      - name: Archive Payload for Tracking
         uses: actions/upload-artifact@v4
         with:
           name: ml-payload
           path: payload.json
-          
+
+  # JOB 3: Predict using the Generative AI (Gemini) model
   predict_gen_ai:
-    # ... (this job is structured identically to predict_ml_model but uses GEN_AI_API_URL)
     runs-on: ubuntu-latest
     needs: check_changes
     if: needs.check_changes.outputs.should_predict == 'true'
     outputs:
       prediction: ${{ steps.predict_step.outputs.result }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v4
+      - name: Checkout Full History
+        uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with: { python-version: '3.10' }
-      - run: pip install pandas requests numpy
-      - name: "Run GenAI Model Prediction"
+      - name: Install Dependencies
+        run: |
+          pip install pandas requests numpy
+          sudo apt-get update && sudo apt-get install -y cloc jq
+      - name: Run GenAI Model Prediction
         id: predict_step
         env:
           PREDICTION_API_URL: ${{ secrets.GEN_AI_API_URL }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python scripts/predict_realtime.py
-          echo "result=$(cat payload.json | jq -r .prediction)" >> "$GITHUB_OUTPUT"
-      - name: "Archive Payload for Tracking"
+          echo "result=$(cat prediction.txt)" >> "$GITHUB_OUTPUT"
+      - name: Archive Payload for Tracking
         uses: actions/upload-artifact@v4
         with:
           name: genai-payload
           path: payload.json
-
 
   # JOB 4: Combine results, get explanation, notify, and build
   notify-and-build:
@@ -81,24 +98,24 @@ jobs:
     needs: [check_changes, predict_ml_model, predict_gen_ai]
     if: always()
     steps:
-      - uses: actions/checkout@v4
-      - name: "Download Payloads for Explanation"
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - name: Download Payloads for Explanation
         if: needs.check_changes.outputs.should_predict == 'true'
         uses: actions/download-artifact@v4
         with:
-          name: ml-payload # We only need one payload
+          name: ml-payload
           path: .
-      - name: "Get AI Explanation on Failure"
+      - name: Get AI Explanation on Failure
         id: get_explanation
         if: needs.predict_ml_model.outputs.prediction == 'Fail'
         env:
-          EXPLAIN_API_URL: ${{ secrets.GEN_AI_API_URL }}/explain # Append /explain to the URL
+          EXPLAIN_API_URL: ${{ secrets.GEN_AI_API_URL }}/explain
         run: |
-          EXPLANATION=$(curl -s -X POST -H "Content-Type: application/json" --data @payload.json "$EXPLAIN_API_URL" | jq -r .explanation)
+          EXPLANATION=$(curl -fsS -X POST -H "Content-Type: application/json" --data @payload.json "$EXPLAIN_API_URL" | jq -r .explanation)
           echo "explanation=$EXPLANATION" >> "$GITHUB_OUTPUT"
 
-      - name: "📬 Post Prediction as a Commit Comment"
-        id: post_comment
+      - name: Post Prediction as a Commit Comment
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SHOULD_PREDICT: ${{ needs.check_changes.outputs.should_predict }}
@@ -106,33 +123,29 @@ jobs:
           GEN_AI_PREDICTION: ${{ needs.predict_gen_ai.outputs.prediction }}
           AI_EXPLANATION: ${{ steps.get_explanation.outputs.explanation }}
         run: |
-          # Use jq to safely build the JSON payload with newlines
           COMMIT_MESSAGE=$(git log -1 --pretty=%s)
           if [ "$SHOULD_PREDICT" == "false" ]; then
-            BODY="✅ **Trivial Change Detected**\n\nNo code files were modified. Skipping build failure prediction."
+            BODY="✅ **Trivial Change Detected**"$'\n\n'"No code files were modified. Skipping build failure prediction."
           else
-            BODY="**Build Failure Prediction Results**\n\n- 🤖 ML Model: \`${ML_PREDICTION:-Not Run}\`\n- 🧠 GenAI Model: \`${GEN_AI_PREDICTION:-Not Run}\`"
-            if [ "${{ needs.predict_ml_model.outputs.prediction }}" == "Fail" ]; then
-              BODY+="\n\n**AI Explanation**: _${AI_EXPLANATION:-Unable to get explanation.}_"
+            ML_RESULT="${{ needs.predict_ml_model.outputs.prediction }}"
+            AI_RESULT="${{ needs.predict_gen_ai.outputs.prediction }}"
+            BODY="**Build Failure Prediction Results**"$'\n\n'"- 🤖 ML Model: \`${ML_RESULT:-Error}\`"$'\n'"- 🧠 GenAI Model: \`${AI_RESULT:-Error}\`"
+            if [ "$ML_RESULT" == "Fail" ]; then
+              EXPLANATION="${{ steps.get_explanation.outputs.explanation }}"
+              BODY+="$'\n\n'"**AI Explanation**: _${AI_EXPLANATION:-Unable to get explanation from the GenAI model.}_"
             fi
           fi
           
-          # This is the robust way to create the comment body
           JSON_PAYLOAD=$(jq -n --arg body "$BODY" '{body: $body}')
+          gh api --method POST -H "Accept: application/vnd.github+json" /repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/comments --input - <<< "$JSON_PAYLOAD"
 
-          gh api \
-            --method POST \
-            -H "Accept: application/vnd.github+json" \
-            /repos/${{ github.repository }}/commits/${{ github.sha }}/comments \
-            --input - <<< "$JSON_PAYLOAD"
-
-      - name: "Set up JDK and Build"
-        # ... (build steps are the same)
+      - name: Set up JDK and Build
         uses: actions/setup-java@v3
         with: { java-version: '17', distribution: 'temurin' }
-      - run: ./mvnw package
+      - name: Run Maven Build
+        run: ./mvnw package
 
-      - name: "📧 Send Email on Failure"
+      - name: Send Email on Failure
         if: failure()
         uses: dawidd6/action-send-mail@v3
         with:
@@ -145,7 +158,5 @@ jobs:
           from: GitHub Actions Notifier <${{ secrets.MAIL_USERNAME }}>
           body: |
             The '${{ github.workflow }}' workflow in the repository '${{ github.repository }}' has failed.
-            
             Commit: ${{ github.sha }}
-            
             Please review the logs for more details: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
