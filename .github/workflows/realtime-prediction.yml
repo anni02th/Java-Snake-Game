@@ -143,30 +143,28 @@ jobs:
           EXPLANATION=$(curl -fsS -X POST -H "Content-Type: application/json" --data @payload.json "$EXPLAIN_API_URL" | jq -r .explanation)
           echo "explanation=$EXPLANATION" >> "$GITHUB_OUTPUT"
 
-      - name: Post Prediction as a Commit Comment
-        # This step will now succeed because the previous steps will pass
+            - name: Post Prediction as a Commit Comment
         id: post_comment
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # The logic for building the body is correct, it was just failing before this step
           if [ "${{ needs.check_changes.outputs.should_predict }}" == "false" ]; then
-            BODY="✅ **Trivial Change Detected**"$'\n\n'"No code files were modified. Skipping build failure prediction."
+            BODY="✅ **Trivial Change Detected**\n\nNo code files were modified. Skipping build failure prediction."
           else
             ML_RESULT="${{ needs.predict_ml_model.outputs.prediction }}"
             AI_RESULT="${{ needs.predict_gen_ai.outputs.prediction }}"
-            BODY="**Build Failure Prediction Results**"$'\n\n'"- 🤖 ML Model: \`${ML_RESULT:-Error}\`"$'\n'"- 🧠 GenAI Model: \`${AI_RESULT:-Error}\`"
+            BODY="**Build Failure Prediction Results**\n\n- 🤖 ML Model: \`${ML_RESULT:-Error}\`\n- 🧠 GenAI Model: \`${AI_RESULT:-Error}\`"
             if [ "$ML_RESULT" == "Fail" ]; then
               EXPLANATION="${{ steps.get_explanation.outputs.explanation }}"
-              BODY+="$'\n\n'"**AI Explanation**: _${EXPLANATION:-Unable to get explanation from the GenAI model.}_"
+              BODY="$BODY\n\n**AI Explanation**: _${EXPLANATION:-Unable to get explanation from the GenAI model.}_"
             fi
           fi
           
-          # Pass the body content as an environment variable to gh api
-          echo "BODY_CONTENT<<EOF" >> $GITHUB_ENV
-          echo "$BODY" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
+          # Write the body to a file instead of an env variable (safer)
+          echo -e "$BODY" > comment_body.txt
 
+          
+          
       - name: Execute Comment Posting
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -175,7 +173,7 @@ jobs:
             --method POST \
             -H "Accept: application/vnd.github+json" \
             /repos/${{ github.repository }}/commits/${{ github.sha }}/comments \
-            -f body="$BODY_CONTENT"
+            -f body="$(cat comment_body.txt)"
 
       - name: Set up JDK and Build
         uses: actions/setup-java@v3
