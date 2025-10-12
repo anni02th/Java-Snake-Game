@@ -115,6 +115,7 @@ jobs:
 
           echo "result=$(cat prediction.txt)" >> "$GITHUB_OUTPUT"
 
+
       - name: Archive Payload for Tracking
         uses: actions/upload-artifact@v4
         with:
@@ -153,20 +154,31 @@ jobs:
           AI_EXPLANATION: ${{ steps.get_explanation.outputs.explanation }}
         run: |
           if [ "$SHOULD_PREDICT" == "false" ]; then
-            BODY="✅ **Trivial Change Detected**"$'\n\n'"No code files were modified. Skipping build failure prediction."
+            echo "✅ **Trivial Change Detected**" > body.txt
+            echo >> body.txt
+            echo "No code files were modified. Skipping build failure prediction." >> body.txt
           else
-            ML_RESULT="${{ needs.predict_ml_model.outputs.prediction }}"
-            AI_RESULT="${{ needs.predict_gen_ai.outputs.prediction }}"
-            BODY="**Build Failure Prediction Results**"$'\n\n'"- 🤖 ML Model: \`${ML_RESULT:-Error}\`"$'\n'"- 🧠 GenAI Model: \`${AI_RESULT:-Error}\`"
+            ML_RESULT="${ML_PREDICTION:-Error}"
+            AI_RESULT="${GEN_AI_PREDICTION:-Error}"
+
+            echo "**Build Failure Prediction Results**" > body.txt
+            echo >> body.txt
+            echo "- 🤖 ML Model: \`${ML_RESULT}\`" >> body.txt
+            echo "- 🧠 GenAI Model: \`${AI_RESULT}\`" >> body.txt
+
             if [ "$ML_RESULT" == "Fail" ]; then
-              EXPLANATION="${{ steps.get_explanation.outputs.explanation }}"
-              BODY+="$'\n\n'"**AI Explanation**: _${AI_EXPLANATION:-Unable to get explanation from the GenAI model.}_"
+              EXPLANATION="${AI_EXPLANATION:-Unable to get explanation from the GenAI model.}"
+              echo >> body.txt
+              echo "**AI Explanation**: _${EXPLANATION}_" >> body.txt
             fi
           fi
 
-          echo 'BODY_CONTENT<<EOF' >> $GITHUB_ENV
-          echo "$BODY" >> $GITHUB_ENV
-          echo 'EOF' >> $GITHUB_ENV
+          {
+            echo 'BODY_CONTENT<<EOF'
+            cat body.txt
+            echo 'EOF'
+          } >> "$GITHUB_ENV"
+
 
       - name: Post Prediction as a Commit Comment
         env:
