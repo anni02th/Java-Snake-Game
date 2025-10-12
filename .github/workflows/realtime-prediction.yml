@@ -154,7 +154,7 @@ jobs:
               BODY+="$'\n\n'"**AI Explanation**: _${AI_EXPLANATION:-Unable to get explanation from the GenAI model.}_"
             fi
           fi
-          echo 'BODY_CONTENT<<EOF' >> $GITHUB_ENV
+          echo 'BODY_CONTENT'<<'EOF' >> $GITHUB_ENV
           echo "$BODY" >> $GITHUB_ENV
           echo 'EOF' >> $GITHUB_ENV
 
