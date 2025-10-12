@@ -143,7 +143,7 @@ jobs:
           EXPLANATION=$(curl -fsS -X POST -H "Content-Type: application/json" --data @payload.json "$EXPLAIN_API_URL" | jq -r .explanation)
           echo "explanation=$EXPLANATION" >> "$GITHUB_OUTPUT"
 
-            - name: Post Prediction as a Commit Comment
+      - name: Post Prediction as a Commit Comment
         id: post_comment
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
