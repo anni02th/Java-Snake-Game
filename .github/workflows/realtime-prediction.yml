@@ -3,7 +3,7 @@ name: "Build Failure Prediction"
 on: [push]
 
 jobs:
-  # JOB 1: Check for meaningful code changes
+  # JOB 1: Check for meaningful code changes (No changes)
   check_changes:
     runs-on: ubuntu-latest
     outputs:
@@ -25,9 +25,10 @@ jobs:
           fi
 
   # JOB 2: Predict using the Machine Learning model
-  predict_ml_model:
+  ml-api:
+    name: "1. Run ML Prediction"
     runs-on: ubuntu-latest
-    needs: check_changes
+    needs: check_changes # Depends on Job 1
     if: needs.check_changes.outputs.should_predict == 'true'
     outputs:
       prediction: ${{ steps.predict_step.outputs.result }}
@@ -49,34 +50,33 @@ jobs:
             
       - name: Install Dependencies
         run: |
-          # ✅ FIXED: Using the correct path to your requirements file
           pip install -r scripts/requirements.txt
           sudo apt-get update && sudo apt-get install -y cloc jq
           
       - name: Run ML Model Prediction
         id: predict_step
         env:
-          PREDICTION_API_URL: ${{ secrets.PREDICTION_API_URL }}
+          PREDICTION_API_URL: ${{ secrets.PREDICTION_API_URL }} # ML Model URL
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python scripts/predict_realtime.py
           echo "result=$(cat prediction.txt)" >> "$GITHUB_OUTPUT"
           
-      - name: Archive Payload for Tracking
+      - name: Archive ML Payload
         uses: actions/upload-artifact@v4
         with:
           name: ml-payload
           path: payload.json
 
   # JOB 3: Predict using the Generative AI (Gemini) model
-  predict_gen_ai:
+  gen-ai-api:
+    name: "2. Run GenAI Prediction"
     runs-on: ubuntu-latest
-    needs: check_changes
-    if: needs.check_changes.outputs.should_predict == 'true'
+    needs: [check_changes, ml-api] # <-- NEW: Runs after ml-api
+    if: needs.check_changes.outputs.should_predict == 'true' # Only if changes
     outputs:
       prediction: ${{ steps.predict_step.outputs.result }}
     steps:
-      # ... (all steps remain the same)
       - name: Checkout Full History
         uses: actions/checkout@v4
         with: { fetch-depth: 0 }
@@ -97,55 +97,64 @@ jobs:
       - name: Run GenAI Model Prediction
         id: predict_step
         env:
-          PREDICTION_API_URL: ${{ secrets.GEN_AI_API_URL }}
+          PREDICTION_API_URL: ${{ secrets.GEN_AI_API_URL }} # GenAI Model URL
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # This runs the *same* script, but the URL points to the
+          # GenAI service, which will receive the new payload
+          # with 'changed_files_details'
           python scripts/predict_realtime.py
           echo "result=$(cat prediction.txt)" >> "$GITHUB_OUTPUT"
-      - name: Archive Payload for Tracking
+      - name: Archive GenAI Payload
         uses: actions/upload-artifact@v4
         with:
-          name: genai-payload
+          name: genai-payload # Use a different name for clarity
           path: payload.json
 
   # JOB 4: Combine results, get explanation, notify, and build
   notify-and-build:
+    name: "3. Report and Build"
     runs-on: ubuntu-latest
-    needs: [check_changes, predict_ml_model, predict_gen_ai]
-    if: always()
+    needs: [check_changes, ml-api, gen-ai-api] # <-- NEW: Depends on all previous jobs
+    if: always() # <-- IMPORTANT: This job runs even if predictions were skipped or failed
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-      - name: Download Payloads for Explanation
-        if: needs.check_changes.outputs.should_predict == 'true'
+        
+      - name: Download GenAI Payload
+        # Only download if predictions actually ran
+        if: needs.check_changes.outputs.should_predict == 'true' && needs.gen-ai-api.result == 'success'
         uses: actions/download-artifact@v4
         with:
-          name: ml-payload # Assuming explanation uses the ML payload
+          name: genai-payload # This is the payload with all file details
           path: .
           
       - name: Get AI Explanation on Failure
         id: get_explanation
-        if: needs.predict_ml_model.outputs.prediction == 'Fail'
+        # Only run if predictions ran AND the ML model predicted Fail
+        if: |
+          needs.check_changes.outputs.should_predict == 'true' &&
+          needs.ml-api.outputs.prediction == 'Fail' &&
+          needs.gen-ai-api.result == 'success'
         env:
           EXPLAIN_API_URL: ${{ secrets.GEN_AI_API_URL }}/explain
         run: |
+          echo "ML model predicted failure. Getting explanation..."
           EXPLANATION=$(curl -fsS -X POST -H "Content-Type: application/json" --data @payload.json "$EXPLAIN_API_URL" | jq -r .explanation)
           echo "explanation<<EOF" >> "$GITHUB_OUTPUT"
           echo "$EXPLANATION" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
           
       - name: Log Data to Dashboard
-        if: needs.check_changes.outputs.should_predict == 'true'
+        # Only log if predictions ran successfully
+        if: needs.check_changes.outputs.should_predict == 'true' && needs.gen-ai-api.result == 'success'
         env:
           LOG_API_URL: ${{ secrets.GEN_AI_API_URL }}/log_commit
-          ML_PREDICTION: ${{ needs.predict_ml_model.outputs.prediction }}
-          GEN_AI_PREDICTION: ${{ needs.predict_gen_ai.outputs.prediction }}
+          ML_PREDICTION: ${{ needs.ml-api.outputs.prediction }}
+          GEN_AI_PREDICTION: ${{ needs.gen-ai-api.outputs.prediction }}
           AI_EXPLANATION: ${{ steps.get_explanation.outputs.explanation }}
         run: |
-          # Read the payload file into a variable
           PAYLOAD_JSON=$(cat payload.json)
-          
-          # Build a new master JSON payload
           JSON_TO_SEND=$(jq -n \
             --arg sha "${{ github.sha }}" \
             --arg msg "$(git log -1 --pretty=%s)" \
@@ -164,17 +173,17 @@ jobs:
               feature_payload: $payload
             }')
           
-          # Send the data to your new /log_commit endpoint
           curl -X POST -H "Content-Type: application/json" \
             --data "$JSON_TO_SEND" \
             "$LOG_API_URL"
 
       - name: Prepare Comment Body
         id: prep_comment
+        # This step always runs to prepare one of the two comment types
         env:
           SHOULD_PREDICT: ${{ needs.check_changes.outputs.should_predict }}
-          ML_PREDICTION: ${{ needs.predict_ml_model.outputs.prediction }}
-          GEN_AI_PREDICTION: ${{ needs.predict_gen_ai.outputs.prediction }}
+          ML_PREDICTION: ${{ needs.ml-api.outputs.prediction }}
+          GEN_AI_PREDICTION: ${{ needs.gen-ai-api.outputs.prediction }}
           AI_EXPLANATION: ${{ steps.get_explanation.outputs.explanation }}
         run: |
           if [ "$SHOULD_PREDICT" == "false" ]; then
@@ -182,8 +191,9 @@ jobs:
             echo "" >> body.txt
             echo "No code files were modified. Skipping build failure prediction." >> body.txt
           else
-            ML_RESULT="${ML_PREDICTION:-Error}"
-            AI_RESULT="${GEN_AI_PREDICTION:-Error}"
+            # Set defaults in case jobs failed or were skipped
+            ML_RESULT="${ML_PREDICTION:-Skipped/Error}"
+            AI_RESULT="${GEN_AI_PREDICTION:-Skipped/Error}"
 
             echo "### 🔮 Build Failure Prediction Results" > body.txt
             echo "" >> body.txt
@@ -206,6 +216,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Post Prediction as a Commit Comment
+        # This step always runs to post the comment
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -220,9 +231,11 @@ jobs:
         with: { java-version: '17', distribution: 'temurin' }
         
       - name: Run Maven Build
+        # This is the final build step
         run: ./mvnw package
 
       - name: Send Email on Failure
+        # This triggers if 'Run Maven Build' (or any previous step in this job) fails
         if: failure()
         uses: dawidd6/action-send-mail@v3
         with:
