@@ -24,7 +24,11 @@ def make_api_request(endpoint):
     if not token or not repo:
         print("Error: GITHUB_TOKEN or GITHUB_REPOSITORY not set.", file=sys.stderr)
         return None
-    url = f"https://api.github.com/repos/{repo}/{endpoint}"
+    
+    # FIX: Correctly build the URL
+    base_url = f"https://api.github.com/repos/{repo}"
+    url = f"{base_url}/{endpoint}" if endpoint else base_url # <-- This is the fix
+    
     headers = {'Authorization': f'token {token}', 'Accept': 'application/vnd.github.v3+json'}
     try:
         response = requests.get(url, headers=headers)
@@ -33,7 +37,6 @@ def make_api_request(endpoint):
     except requests.exceptions.RequestException as e:
         print(f"API request failed: {e}", file=sys.stderr)
         return None
-
 def get_detailed_churn():
     """
     Calculates aggregate churn features and NEW detailed file-level changes.
