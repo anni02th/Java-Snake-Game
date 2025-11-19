@@ -272,5 +272,3 @@ if __name__ == "__main__":
         print(f"❌ Unexpected error: {err}", file=sys.stderr)
         print(f"Traceback:\n{traceback.format_exc()}", file=sys.stderr)
         sys.exit(1)
-
-    print(f"\n✨ Script completed in {time.time() - start_time:.2f} seconds.")
