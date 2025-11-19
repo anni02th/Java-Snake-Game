@@ -212,9 +212,6 @@ jobs:
         uses: actions/setup-java@v3
         with: { java-version: '17', distribution: 'temurin' }
         
-      - name: Run Maven Build
-        run: ./mvnw package
-
       - name: Send Email on Failure
         if: failure()
         uses: dawidd6/action-send-mail@v3
