@@ -217,6 +217,10 @@ if __name__ == "__main__":
     # This now includes the new 'changed_files_details' list
     payload = df_final.to_dict(orient='records')[0]
     
+    payload['commit_sha'] = os.environ.get('GITHUB_SHA', 'unknown_sha')
+    payload['author'] = os.environ.get('GITHUB_ACTOR', 'unknown_actor')
+    payload['commit_message'] = os.environ.get('COMMIT_MESSAGE', 'No commit message available')
+    
     # Clean up numpy types for JSON serialization
     for key, value in payload.items():
         if isinstance(value, (np.integer, np.int64)):
@@ -231,10 +235,14 @@ if __name__ == "__main__":
         json.dump(payload, f, indent=2)
         print("\n✅ Payload generated:\n", json.dumps(payload, indent=2), file=sys.stderr)
 
-    API_URL = os.environ.get("PREDICTION_API_URL")
-    if not API_URL:
+    API_URL_BASE = os.environ.get("PREDICTION_API_URL")
+    ENDPOINT = "/predict"
+    
+    if not API_URL_BASE:
         print("❌ Error: PREDICTION_API_URL environment variable not set.", file=sys.stderr)
         sys.exit(1)
+        
+    FULL_API_URL = f"{API_URL_BASE}{ENDPOINT}"
 
     try:
         print(f"📡 Sending request to: {API_URL}", file=sys.stderr)
@@ -257,8 +265,12 @@ if __name__ == "__main__":
 
     except requests.exceptions.HTTPError as http_err:
         print(f"❌ HTTP error occurred: {http_err}", file=sys.stderr)
+        print(f"🔎 Response URL: {FULL_API_URL}", file=sys.stderr)
         print(f"🔎 Response content: {response.text}", file=sys.stderr)
         sys.exit(1)
     except Exception as err:
         print(f"❌ Unexpected error: {err}", file=sys.stderr)
+        print(f"Traceback:\n{traceback.format_exc()}", file=sys.stderr)
         sys.exit(1)
+
+    print(f"\n✨ Script completed in {time.time() - start_time:.2f} seconds.")
