@@ -235,14 +235,14 @@ if __name__ == "__main__":
         json.dump(payload, f, indent=2)
         print("\n✅ Payload generated:\n", json.dumps(payload, indent=2), file=sys.stderr)
 
-    API_URL_BASE = os.environ.get("PREDICTION_API_URL")
+    API_URL = os.environ.get("PREDICTION_API_URL")
     ENDPOINT = "/predict"
     
-    if not API_URL_BASE:
+    if not API_URL:
         print("❌ Error: PREDICTION_API_URL environment variable not set.", file=sys.stderr)
         sys.exit(1)
         
-    FULL_API_URL = f"{API_URL_BASE}{ENDPOINT}"
+    FULL_API_URL = f"{API_URL}{ENDPOINT}"
 
     try:
         print(f"📡 Sending request to: {API_URL}", file=sys.stderr)
