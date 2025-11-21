@@ -132,7 +132,7 @@ jobs:
           needs.check_changes.outputs.should_predict == 'true' &&
           needs.ml-api.outputs.prediction == 'Fail'
         env:
-          EXPLAIN_API_URL: ${{ secrets.GEN_AI_API_URL }}
+          EXPLAIN_API_URL: ${{ secrets.GEN_AI_API_URL }}/explain
         run: |
           echo "ML model predicted failure. Attempting to get explanation..."
           
@@ -147,15 +147,23 @@ jobs:
               
             RESPONSE_BODY=$(cat "$TEMP_BODY_FILE")
             
-            # Defensive check: if HTTP status is bad (>=400) or body is empty, inject a JSON error message.
+            # 💡 FIX: Use jq -n to safely construct a JSON error message, 
+            # preserving HTTP_STATUS and raw response body.
             if [ "$HTTP_STATUS" -ge 400 ] || [ -z "$RESPONSE_BODY" ]; then
-              # Inject a safe JSON object containing the error details
-              RESPONSE_BODY='{"report": "API Failure", "detail": "API Call failed with HTTP Status: '$HTTP_STATUS'. Response body was: '${RESPONSE_BODY}'"}'
+              echo "Error: API returned status $HTTP_STATUS or empty response. Constructing safe error message."
+              RESPONSE_BODY=$(jq -n \
+                --arg status "$HTTP_STATUS" \
+                --arg raw_body "$RESPONSE_BODY" \
+                '{
+                  report: "API Failure",
+                  detail: "API Call failed with HTTP Status: \($status). Check Cloud Run logs for trace.",
+                  raw_response: $raw_body
+                }')
             fi
             
-            # Attempt to parse. We use a final fallback string if jq fails to parse our injected JSON.
-            # 2>/dev/null suppresses the 'jq: parse error' output in the terminal if it still fails.
-            EXPLANATION=$(echo "$RESPONSE_BODY" | jq -r '.report // .detail // "Unknown JSON parsing error (likely non-JSON content passed to jq)."' 2>/dev/null)
+            # Attempt to parse the response. This is now safer since we guarantee RESPONSE_BODY is valid JSON.
+            # We look for 'report', then 'detail', then provide a final fallback.
+            EXPLANATION=$(echo "$RESPONSE_BODY" | jq -r '.report // .detail // "Unknown error. Check the raw_response field in log payload."' 2>/dev/null)
             
             # If jq still failed for some reason, use a final hardcoded error
             if [ $? -ne 0 ]; then
