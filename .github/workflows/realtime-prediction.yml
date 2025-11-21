@@ -136,21 +136,33 @@ jobs:
         run: |
           echo "ML model predicted failure. Attempting to get explanation..."
           
-          # CRITICAL FIX: The curl command is designed to capture the response body 
-          # even if the HTTP status code indicates an error (e.g., 500).
-          # We check if payload.json exists before attempting to read it.
           if [ ! -f payload.json ]; then
-            echo "Explanation payload not found. Skipping API call."
             EXPLANATION="Internal Error: Explanation payload file (payload.json) was not found."
           else
-            # Execute curl and use '|| echo ...' to ensure a JSON string is always captured 
-            # if curl fails entirely (e.g., DNS error).
-            RESPONSE_BODY=$(curl -sS -X POST -H "Content-Type: application/json" \
-              --data @payload.json "$EXPLAIN_API_URL" || echo '{"report": "CURL_FAILURE", "detail": "CURL_ERROR_OCCURRED"}')
+            # Execute curl, saving the body to a temp file and printing the status code
+            TEMP_BODY_FILE="response_body.txt"
+            # Capture HTTP status code using -w "%{http_code}"
+            HTTP_STATUS=$(curl -sS -X POST -H "Content-Type: application/json" \
+              --data @payload.json "$EXPLAIN_API_URL" -o "$TEMP_BODY_FILE" -w "%{http_code}")
               
-            # Extracts the 'report' field if successful, otherwise extracts the 'detail' (the error message)
-            # 'jq' syntax: .report // .detail tries the first field, then the second, then defaults to the string.
-            EXPLANATION=$(echo "$RESPONSE_BODY" | jq -r '.report // .detail // "Unknown error: check Cloud Run logs. Raw response was not JSON."')
+            RESPONSE_BODY=$(cat "$TEMP_BODY_FILE")
+            
+            # Defensive check: if HTTP status is bad (>=400) or body is empty, inject a JSON error message.
+            if [ "$HTTP_STATUS" -ge 400 ] || [ -z "$RESPONSE_BODY" ]; then
+              # Inject a safe JSON object containing the error details
+              RESPONSE_BODY='{"report": "API Failure", "detail": "API Call failed with HTTP Status: '$HTTP_STATUS'. Response body was: '${RESPONSE_BODY}'"}'
+            fi
+            
+            # Attempt to parse. We use a final fallback string if jq fails to parse our injected JSON.
+            # 2>/dev/null suppresses the 'jq: parse error' output in the terminal if it still fails.
+            EXPLANATION=$(echo "$RESPONSE_BODY" | jq -r '.report // .detail // "Unknown JSON parsing error (likely non-JSON content passed to jq)."' 2>/dev/null)
+            
+            # If jq still failed for some reason, use a final hardcoded error
+            if [ $? -ne 0 ]; then
+                EXPLANATION="Critical JSON Parsing Error. Raw content: ${RESPONSE_BODY}"
+            fi
+
+            rm -f "$TEMP_BODY_FILE"
           fi
 
           # Set the output variable using the multiline delimiter syntax
