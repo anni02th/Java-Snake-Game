@@ -112,11 +112,18 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-      - name: Download Payloads
+
+      # Install JQ, which is needed for JSON parsing in the explanation step
+      - name: Install Utility Dependencies (jq)
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq
+          
+      - name: Download GenAI Payload
+        id: download_payload
         if: needs.check_changes.outputs.should_predict == 'true'
         uses: actions/download-artifact@v4
         with:
-          name: genai-payload # Use the payload from GenAI
+          name: genai-payload
           path: .
           
       - name: Get AI Explanation on Failure
@@ -129,16 +136,24 @@ jobs:
         run: |
           echo "ML model predicted failure. Attempting to get explanation..."
           
-          # CRITICAL FIX: Removed the '-f' (fail-fast) flag from curl to capture the 500 response body.
-          # We capture the full JSON response, and use jq to extract the 'report' or the 'detail' error message.
-          
-          RESPONSE_BODY=$(curl -sS -X POST -H "Content-Type: application/json" \
-            --data @payload.json "$EXPLAIN_API_URL" || echo '{"report": "CURL_FAILURE", "detail": "CURL_ERROR_OCCURRED"}')
-            
-          # Extracts the 'report' field if successful, otherwise extracts the 'detail' (the error message)
-          # 'jq' syntax: .report // .detail tries the first field, then the second, then defaults to the string.
-          EXPLANATION=$(echo "$RESPONSE_BODY" | jq -r '.report // .detail // "Unknown error: check Cloud Run logs."')
+          # CRITICAL FIX: The curl command is designed to capture the response body 
+          # even if the HTTP status code indicates an error (e.g., 500).
+          # We check if payload.json exists before attempting to read it.
+          if [ ! -f payload.json ]; then
+            echo "Explanation payload not found. Skipping API call."
+            EXPLANATION="Internal Error: Explanation payload file (payload.json) was not found."
+          else
+            # Execute curl and use '|| echo ...' to ensure a JSON string is always captured 
+            # if curl fails entirely (e.g., DNS error).
+            RESPONSE_BODY=$(curl -sS -X POST -H "Content-Type: application/json" \
+              --data @payload.json "$EXPLAIN_API_URL" || echo '{"report": "CURL_FAILURE", "detail": "CURL_ERROR_OCCURRED"}')
+              
+            # Extracts the 'report' field if successful, otherwise extracts the 'detail' (the error message)
+            # 'jq' syntax: .report // .detail tries the first field, then the second, then defaults to the string.
+            EXPLANATION=$(echo "$RESPONSE_BODY" | jq -r '.report // .detail // "Unknown error: check Cloud Run logs. Raw response was not JSON."')
+          fi
 
+          # Set the output variable using the multiline delimiter syntax
           echo "explanation<<EOF" >> "$GITHUB_OUTPUT"
           echo "$EXPLANATION" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
@@ -151,7 +166,9 @@ jobs:
           GEN_AI_PREDICTION: ${{ needs.gen-ai-api.outputs.prediction }}
           AI_EXPLANATION: ${{ steps.get_explanation.outputs.explanation }}
         run: |
-          # Use 'jq' to create the final JSON payload
+          # Use a check to determine if the payload.json exists before trying to read it.
+          PAYLOAD_JSON=$(cat payload.json 2>/dev/null || echo 'null')
+          
           JSON_TO_SEND=$(jq -n \
             --arg sha "${{ github.sha }}" \
             --arg msg "$(git log -1 --pretty=%s)" \
@@ -159,7 +176,7 @@ jobs:
             --arg ml_pred "${ML_PREDICTION:-Error}" \
             --arg genai_pred "${GEN_AI_PREDICTION:-Error}" \
             --arg explanation "${AI_EXPLANATION:-N/A}" \
-            --argjson payload "$(cat payload.json || echo 'null')" \
+            --argjson payload "$PAYLOAD_JSON" \
             '{
               commit_sha: $sha,
               commit_message: $msg,
