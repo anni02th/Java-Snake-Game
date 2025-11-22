@@ -6,7 +6,7 @@ import json
 import requests
 import sys
 from datetime import datetime, timezone
-import traceback
+import traceback # Added for better error reporting in main
 
 # --- 1. DYNAMIC FEATURE COLLECTION ---
 
@@ -42,7 +42,7 @@ def make_api_request(endpoint):
 
 def get_detailed_churn():
     """
-    Calculates aggregate churn features and detailed file-level changes.
+    Calculates aggregate churn features and NEW detailed file-level changes.
     """
     features = {
         'src_churn': 0, 'files_added': 0, 'files_deleted': 0, 'files_modified': 0,
@@ -60,6 +60,8 @@ def get_detailed_churn():
     for line in numstat.splitlines():
         parts = line.split('\t')
         if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            # path is parts[2]
+            # churn is added (parts[0]) + deleted (parts[1])
             line_changes[parts[2]] = int(parts[0]) + int(parts[1])
 
     # Process each file's status
@@ -69,7 +71,7 @@ def get_detailed_churn():
             continue
         
         change_type = parts[0]
-        path = parts[-1] 
+        path = parts[-1] # Always the last part (handles A, M, D, and Renames)
         
         churn = line_changes.get(path, 0)
         is_test = 'test' in path.lower()
@@ -104,6 +106,7 @@ def get_detailed_churn():
 
 def get_full_diff_limited(limit_lines=200):
     """
+    *** NEW FUNCTION ***
     Executes git diff (content of changes) and limits the output to 200 lines.
     """
     print(f"📝 Collecting first {limit_lines} lines of code changes...", file=sys.stderr)
@@ -178,7 +181,7 @@ def get_project_history():
             outcomes = [1 if r['conclusion'] == 'success' else 0 for r in completed]
             if outcomes:
                 features['project_fail_history'] = 1.0 - np.mean(outcomes)
-                features['project_fail_recent'] = 1.0 - np.mean(outcomes[:5])
+                features['project_fail_recent'] = 1.0 - np.mean(outcomes[:5]) # Fail rate of 5 most recent
                 
     return features
 
@@ -194,7 +197,9 @@ def get_live_features():
     features.update(get_sloc_with_cloc())
     features.update(get_project_history())
     
+    # --- INTEGRATION OF NEW FEATURE ---
     features['limited_diff_content'] = get_full_diff_limited(limit_lines=200) 
+    # --- END INTEGRATION ---
     
     return features
 
@@ -204,100 +209,37 @@ def create_engineered_features(df):
     """Engineers new features from the raw collected data."""
     print("🛠️ Engineering features...", file=sys.stderr)
     
+    # Avoid division by zero if sloc is 0
     df['test_lines_per_kloc'] = (df['test_lines'] / (df['sloc'] + 1e-6)) * 1000
     
+    # Binning recent failure rate
     df['recent_fail_binned'] = pd.cut(df['project_fail_recent'], 
                                       bins=[-0.1, 0.0, 0.3, 0.7, 1.0], 
                                       labels=[0, 1, 2, 3], 
                                       right=True).cat.codes
     
+    # Weighted historical context
     df['historical_context'] = (df['project_fail_recent'] * 0.6 + df['project_fail_history'] * 0.4)
     
     return df
 
-def request_prediction(payload, api_url):
-    """Sends the feature payload to the prediction API and returns the result."""
-    print(f"📡 Sending prediction request to: {api_url}", file=sys.stderr)
-    try:
-        response = requests.post(api_url, headers={'Content-Type': 'application/json'}, json=payload)
-        response.raise_for_status()
-
-        result = response.json()
-        prediction = result.get("prediction")
-
-        if prediction is None:
-            print("❌ 'prediction' field missing or null in response!", file=sys.stderr)
-            print("🔎 Response content:", result, file=sys.stderr)
-            return None
-
-        # Write prediction to file for GitHub Actions output
-        with open('prediction.txt', 'w') as f:
-            f.write(str(prediction))
-
-        print(f"✅ Prediction result: {prediction}")
-        return prediction
-
-    except requests.exceptions.HTTPError as http_err:
-        print(f"❌ HTTP error occurred: {http_err}", file=sys.stderr)
-        print(f"🔎 Response content: {response.text}", file=sys.stderr)
-        return None
-    except Exception as err:
-        print(f"❌ Unexpected error during prediction: {err}", file=sys.stderr)
-        print(f"Traceback:\n{traceback.format_exc()}", file=sys.stderr)
-        return None
-
-def request_explanation(payload, api_url, ml_prediction):
-    """
-    Sends the feature payload (including diff content) to the GenAI explanation API
-    and returns the explanation report.
-    """
-    print(f"🧠 ML predicted '{ml_prediction}'. Requesting AI explanation from: {api_url}", file=sys.stderr)
-
-    # Add the ML prediction result to the payload for context
-    payload['ml_prediction_result'] = ml_prediction
-    
-    try:
-        response = requests.post(api_url, headers={'Content-Type': 'application/json'}, json=payload)
-        response.raise_for_status()
-
-        result = response.json()
-        
-        # Check for the expected output field (e.g., 'report' or 'explanation')
-        explanation = result.get("report") or result.get("explanation")
-        
-        if explanation is None:
-            print("❌ Explanation field ('report' or 'explanation') missing in response!", file=sys.stderr)
-            print("🔎 Response content:", result, file=sys.stderr)
-            return "Internal API Error: GenAI explanation field was missing."
-
-        print("✅ Successfully received AI explanation.", file=sys.stderr)
-        return explanation
-
-    except requests.exceptions.HTTPError as http_err:
-        print(f"❌ HTTP error occurred during explanation call: {http_err}", file=sys.stderr)
-        return f"API Failure (HTTP {response.status_code}): Could not get explanation."
-    except Exception as err:
-        print(f"❌ Unexpected error during explanation: {err}", file=sys.stderr)
-        return f"Unexpected Error: {err}"
-
-
 if __name__ == "__main__":
-    
-    # 1. Collect and Prepare Data
     raw_features = get_live_features()
     
-    # Store diff content temporarily
+    # Convert to DataFrame for feature engineering
+    # Temporarily remove 'limited_diff_content' to avoid issues with Pandas/Numpy types if it's too large,
+    # then re-add it manually.
     diff_content = raw_features.pop('limited_diff_content', '')
     
-    # Convert to DataFrame for feature engineering
     df_live = pd.DataFrame([raw_features])
     df_final = create_engineered_features(df_live)
 
     # Convert DataFrame row back to a dictionary for JSON payload
     payload = df_final.to_dict(orient='records')[0]
     
-    # Re-add the diff content and commit metadata to the final payload
+    # Re-add the diff content to the final payload
     payload['limited_diff_content'] = diff_content
+    
     payload['commit_sha'] = os.environ.get('GITHUB_SHA', 'unknown_sha')
     payload['author'] = os.environ.get('GITHUB_ACTOR', 'unknown_actor')
     payload['commit_message'] = os.environ.get('COMMIT_MESSAGE', 'No commit message available')
@@ -311,45 +253,47 @@ if __name__ == "__main__":
         elif isinstance(value, (np.bool_)):
             payload[key] = bool(value)
 
-    # Save the full payload (with diff) for debugging and artifact upload
+    # Save the payload for debugging and artifact upload
     with open('payload.json', 'w') as f:
+        # Use json.dumps with ensure_ascii=False to handle complex strings better
         json.dump(payload, f, indent=2, ensure_ascii=False)
-        print("\n✅ Payload generated and saved to payload.json", file=sys.stderr)
+        print("\n✅ Payload generated:\n", json.dumps(payload, indent=2, ensure_ascii=False), file=sys.stderr)
 
-    # 2. Handle Execution Modes (Prediction or Explanation)
+    API_URL = os.environ.get("PREDICTION_API_URL")
+    ENDPOINT = "/predict"
     
-    # Get the execution mode passed as a command-line argument
-    mode = sys.argv[1] if len(sys.argv) > 1 else 'predict' 
-    
-    if mode == 'predict':
-        # PREDICTION MODE: Called from ml-api and gen-ai-api jobs
-        api_url = os.environ.get("PREDICTION_API_URL")
-        if not api_url:
-            print("❌ Error: PREDICTION_API_URL environment variable not set.", file=sys.stderr)
-            sys.exit(1)
-            
-        prediction_endpoint = "/predict"
-        full_api_url = f"{api_url}{prediction_endpoint}"
-        request_prediction(payload, full_api_url)
+    if not API_URL:
+        print("❌ Error: PREDICTION_API_URL environment variable not set.", file=sys.stderr)
+        sys.exit(1)
+        
+    FULL_API_URL = f"{API_URL}{ENDPOINT}"
 
-    elif mode == 'explain':
-        # EXPLANATION MODE: Called from notify-and-build job
-        explain_api_url = os.environ.get("EXPLAIN_API_URL")
-        ml_prediction = os.environ.get("ML_PREDICTION_RESULT")
-        
-        if not explain_api_url or not ml_prediction:
-            print("❌ Error: EXPLAIN_API_URL or ML_PREDICTION_RESULT not set for explanation mode.", file=sys.stderr)
-            sys.exit(1)
-        
-        # Request the explanation
-        explanation_report = request_explanation(payload, explain_api_url, ml_prediction)
-        
-        # Write explanation to file for GitHub Actions output
-        with open('explanation.txt', 'w') as f:
-            f.write(explanation_report)
-        
-        print(f"✅ Explanation generation complete. Result saved to explanation.txt", file=sys.stderr)
+    try:
+        print(f"📡 Sending request to: {API_URL}", file=sys.stderr)
+        # Use FULL_API_URL for the post request
+        response = requests.post(FULL_API_URL, headers={'Content-Type': 'application/json'}, json=payload)
+        response.raise_for_status()
 
-    else:
-        print(f"❌ Invalid mode provided: {mode}", file=sys.stderr)
+        result = response.json()
+        prediction = result.get("prediction")
+
+        if prediction is None:
+            print("❌ 'prediction' field missing or null in response!", file=sys.stderr)
+            print("🔎 Response content:", result, file=sys.stderr)
+            sys.exit(1)
+
+        # Write prediction to file for GitHub Actions output
+        with open('prediction.txt', 'w') as f:
+            f.write(str(prediction))
+
+        print(f"✅ Prediction result: {prediction}")
+
+    except requests.exceptions.HTTPError as http_err:
+        print(f"❌ HTTP error occurred: {http_err}", file=sys.stderr)
+        print(f"🔎 Response URL: {FULL_API_URL}", file=sys.stderr)
+        print(f"🔎 Response content: {response.text}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as err:
+        print(f"❌ Unexpected error: {err}", file=sys.stderr)
+        print(f"Traceback:\n{traceback.format_exc()}", file=sys.stderr)
         sys.exit(1)
