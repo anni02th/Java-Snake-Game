@@ -175,6 +175,9 @@ jobs:
           echo "explanation<<EOF" >> "$GITHUB_OUTPUT"
           echo "$EXPLANATION" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
+          
+          # Exit successfully regardless of API status
+          exit 0
 
       - name: Log Data to Dashboard
         if: needs.check_changes.outputs.should_predict == 'true'
