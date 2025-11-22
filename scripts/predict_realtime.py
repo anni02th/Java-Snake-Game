@@ -6,14 +6,12 @@ import json
 import requests
 import sys
 from datetime import datetime, timezone
-import traceback # Added for better error reporting in main
 
 # --- 1. DYNAMIC FEATURE COLLECTION ---
 
 def run_command(command):
     """Executes a shell command and returns its stdout."""
     try:
-        # Added check=True to raise error on non-zero exit status
         return subprocess.run(command, shell=True, capture_output=True, text=True, check=True).stdout.strip()
     except subprocess.CalledProcessError as e:
         print(f"Command failed: {command}\n{e.stderr}", file=sys.stderr)
@@ -27,9 +25,9 @@ def make_api_request(endpoint):
         print("Error: GITHUB_TOKEN or GITHUB_REPOSITORY not set.", file=sys.stderr)
         return None
     
-    # Correctly build the URL
+    # FIX: Correctly build the URL
     base_url = f"https://api.github.com/repos/{repo}"
-    url = f"{base_url}/{endpoint}" if endpoint else base_url
+    url = f"{base_url}/{endpoint}" if endpoint else base_url # <-- This is the fix
     
     headers = {'Authorization': f'token {token}', 'Accept': 'application/vnd.github.v3+json'}
     try:
@@ -39,7 +37,6 @@ def make_api_request(endpoint):
     except requests.exceptions.RequestException as e:
         print(f"API request failed: {e}", file=sys.stderr)
         return None
-
 def get_detailed_churn():
     """
     Calculates aggregate churn features and NEW detailed file-level changes.
@@ -47,7 +44,7 @@ def get_detailed_churn():
     features = {
         'src_churn': 0, 'files_added': 0, 'files_deleted': 0, 'files_modified': 0,
         'test_churn': 0, 'tests_added': 0, 'tests_deleted': 0, 'tests_modified': 0,
-        'changed_files_details': []
+        'changed_files_details': []  # <-- NEW: For detailed GenAI reporting
     }
     
     # Get churn (lines added/deleted) per file
@@ -76,15 +73,16 @@ def get_detailed_churn():
         churn = line_changes.get(path, 0)
         is_test = 'test' in path.lower()
 
-        # Store detailed file info
+        # --- NEW: Store detailed file info ---
         file_detail = {
             "path": path,
-            "change_type": change_type,
+            "change_type": change_type,  # e.g., 'M', 'A', 'D', 'R100'
             "churn": churn
         }
         features['changed_files_details'].append(file_detail)
-        
-        # Aggregate logic
+        # --- END NEW ---
+
+        # Aggregate logic (updated to handle renames as 'additions')
         if is_test:
             features['test_churn'] += churn
             if 'A' in change_type or 'R' in change_type:
@@ -104,22 +102,6 @@ def get_detailed_churn():
                 
     return features
 
-def get_full_diff_limited(limit_lines=200):
-    """
-    *** NEW FUNCTION ***
-    Executes git diff (content of changes) and limits the output to 200 lines.
-    """
-    print(f"📝 Collecting first {limit_lines} lines of code changes...", file=sys.stderr)
-    # 1. Get the full unified diff content (actual code changes)
-    full_diff = run_command("git diff HEAD~1 HEAD")
-    
-    # 2. Split the output into lines and take only the first 'limit_lines'
-    diff_lines = full_diff.splitlines()
-    limited_diff_lines = diff_lines[:limit_lines]
-    
-    # 3. Join the limited lines back into a single string
-    return "\n".join(limited_diff_lines)
-
 def get_sloc_with_cloc():
     """Uses cloc to find Source Lines of Code for Java."""
     features = {'sloc': 0, 'test_lines': 0}
@@ -130,8 +112,14 @@ def get_sloc_with_cloc():
         return features
     try:
         data = json.loads(cloc_json_str)
+        # Summing up Java code. Add other languages if needed.
         if 'Java' in data:
             features['sloc'] = data['Java'].get('code', 0)
+        # This is a simple heuristic for test lines.
+        # A better way would be to run cloc on test/ and src/ separately.
+        # For now, let's assume 'test_lines' is not easily separable this way
+        # and might be 0 unless cloc is configured to find test files.
+        # This part remains as it was, as logic for 'test_lines' wasn't specified.
     except json.JSONDecodeError:
         print("Failed to decode cloc JSON output.", file=sys.stderr)
     return features
@@ -143,7 +131,7 @@ def get_project_history():
         'elapsed_days_last_build': 0,
         'project_fail_history': 0.0,
         'project_fail_recent': 0.0,
-        'commit_interval': 0.0,
+        'commit_interval': 0.0, # Note: This feature is not implemented
         'project_age': 0
     }
     
@@ -189,18 +177,13 @@ def get_live_features():
     """Collects all dynamic features for the current commit."""
     print("📊 Collecting dynamic features for the latest commit...", file=sys.stderr)
     features = {
-        'team_size': 1,
-        'num_commit_comments': 0,
-        'committers': 1
+        'team_size': 1, # Note: Not implemented, default 1
+        'num_commit_comments': 0, # Note: Not implemented, default 0
+        'committers': 1 # Note: Not implemented, default 1
     }
     features.update(get_detailed_churn())
     features.update(get_sloc_with_cloc())
     features.update(get_project_history())
-    
-    # --- INTEGRATION OF NEW FEATURE ---
-    features['limited_diff_content'] = get_full_diff_limited(limit_lines=200) 
-    # --- END INTEGRATION ---
-    
     return features
 
 # --- 2. FEATURE ENGINEERING & EXECUTION ---
@@ -227,18 +210,12 @@ if __name__ == "__main__":
     raw_features = get_live_features()
     
     # Convert to DataFrame for feature engineering
-    # Temporarily remove 'limited_diff_content' to avoid issues with Pandas/Numpy types if it's too large,
-    # then re-add it manually.
-    diff_content = raw_features.pop('limited_diff_content', '')
-    
     df_live = pd.DataFrame([raw_features])
     df_final = create_engineered_features(df_live)
 
     # Convert DataFrame row back to a dictionary for JSON payload
+    # This now includes the new 'changed_files_details' list
     payload = df_final.to_dict(orient='records')[0]
-    
-    # Re-add the diff content to the final payload
-    payload['limited_diff_content'] = diff_content
     
     payload['commit_sha'] = os.environ.get('GITHUB_SHA', 'unknown_sha')
     payload['author'] = os.environ.get('GITHUB_ACTOR', 'unknown_actor')
@@ -255,9 +232,8 @@ if __name__ == "__main__":
 
     # Save the payload for debugging and artifact upload
     with open('payload.json', 'w') as f:
-        # Use json.dumps with ensure_ascii=False to handle complex strings better
-        json.dump(payload, f, indent=2, ensure_ascii=False)
-        print("\n✅ Payload generated:\n", json.dumps(payload, indent=2, ensure_ascii=False), file=sys.stderr)
+        json.dump(payload, f, indent=2)
+        print("\n✅ Payload generated:\n", json.dumps(payload, indent=2), file=sys.stderr)
 
     API_URL = os.environ.get("PREDICTION_API_URL")
     ENDPOINT = "/predict"
@@ -270,21 +246,20 @@ if __name__ == "__main__":
 
     try:
         print(f"📡 Sending request to: {API_URL}", file=sys.stderr)
-        # Use FULL_API_URL for the post request
-        response = requests.post(FULL_API_URL, headers={'Content-Type': 'application/json'}, json=payload)
+        response = requests.post(API_URL, headers={'Content-Type': 'application/json'}, json=payload)
         response.raise_for_status()
 
         result = response.json()
-        prediction = result.get("prediction")
+        prediction = result.get("prediction", None)
 
-        if prediction is None:
+        if prediction is None: # Check for None explicitly
             print("❌ 'prediction' field missing or null in response!", file=sys.stderr)
             print("🔎 Response content:", result, file=sys.stderr)
             sys.exit(1)
 
         # Write prediction to file for GitHub Actions output
         with open('prediction.txt', 'w') as f:
-            f.write(str(prediction))
+            f.write(str(prediction)) # Ensure it's a string
 
         print(f"✅ Prediction result: {prediction}")
 

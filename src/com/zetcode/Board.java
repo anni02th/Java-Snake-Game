@@ -185,6 +185,18 @@ public class Board extends JPanel implements ActionListener {
         r = (int) (Math.random() * RAND_POS);
         apple_y = ((r * DOT_SIZE));
     }
+    @Override
+    public void actionPerformed(ActionEvent e) {
+
+        if (inGame) {
+
+            checkApple();
+            checkCollision();
+            move();
+        }
+
+        repaint();
+    }
 
 
     private class TAdapter extends KeyAdapter {
