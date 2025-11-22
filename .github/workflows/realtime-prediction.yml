@@ -147,27 +147,28 @@ jobs:
               
             RESPONSE_BODY=$(cat "$TEMP_BODY_FILE")
             
-            # 💡 FIX: Use jq -n to safely construct a JSON error message, 
-            # preserving HTTP_STATUS and raw response body.
-            if [ "$HTTP_STATUS" -ge 400 ] || [ -z "$RESPONSE_BODY" ]; then
-              echo "Error: API returned status $HTTP_STATUS or empty response. Constructing safe error message."
-              RESPONSE_BODY=$(jq -n \
-                --arg status "$HTTP_STATUS" \
-                --arg raw_body "$RESPONSE_BODY" \
-                '{
-                  report: "API Failure",
-                  detail: "API Call failed with HTTP Status: \($status). Check Cloud Run logs for trace.",
-                  raw_response: $raw_body
-                }')
-            fi
+            echo "Received HTTP Status: $HTTP_STATUS"
+            echo "Response Body Preview: ${RESPONSE_BODY:0:200}"
             
-            # Attempt to parse the response. This is now safer since we guarantee RESPONSE_BODY is valid JSON.
-            # We look for 'report', then 'detail', then provide a final fallback.
-            EXPLANATION=$(echo "$RESPONSE_BODY" | jq -r '.report // .detail // "Unknown error. Check the raw_response field in log payload."' 2>/dev/null)
-            
-            # If jq still failed for some reason, use a final hardcoded error
-            if [ $? -ne 0 ]; then
-                EXPLANATION="Critical JSON Parsing Error. Raw content: ${RESPONSE_BODY}"
+            # Check for success status codes (2xx)
+            if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
+              # Success - parse the explanation
+              EXPLANATION=$(echo "$RESPONSE_BODY" | jq -r '.report // .explanation // .detail // "Explanation not found in response."' 2>/dev/null)
+              
+              # If jq parsing failed, use raw response
+              if [ $? -ne 0 ] || [ -z "$EXPLANATION" ]; then
+                EXPLANATION="Raw API Response: ${RESPONSE_BODY}"
+              fi
+            else
+              # API returned an error status or empty response
+              echo "Error: API returned status $HTTP_STATUS. Constructing error message."
+              ERROR_DETAIL=$(echo "$RESPONSE_BODY" | jq -r '.error // .message // .detail // ""' 2>/dev/null)
+              
+              if [ -n "$ERROR_DETAIL" ]; then
+                EXPLANATION="API Error (HTTP $HTTP_STATUS): $ERROR_DETAIL"
+              else
+                EXPLANATION="API Error (HTTP $HTTP_STATUS): Unable to get explanation. Check Cloud Run logs for trace."
+              fi
             fi
 
             rm -f "$TEMP_BODY_FILE"

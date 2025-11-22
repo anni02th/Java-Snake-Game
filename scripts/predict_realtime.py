@@ -37,6 +37,25 @@ def make_api_request(endpoint):
     except requests.exceptions.RequestException as e:
         print(f"API request failed: {e}", file=sys.stderr)
         return None
+def get_code_diff():
+    """
+    Gets the actual code diff (up to 200 lines) for GenAI explanation.
+    """
+    # Get the unified diff with context
+    diff_output = run_command("git diff HEAD~1 HEAD")
+    
+    if not diff_output:
+        return "No code changes detected"
+    
+    # Limit to approximately 200 lines to avoid payload issues
+    lines = diff_output.splitlines()
+    if len(lines) > 200:
+        truncated_diff = '\n'.join(lines[:200])
+        truncated_diff += "\n\n... [diff truncated for brevity]"
+        return truncated_diff
+    
+    return diff_output
+
 def get_detailed_churn():
     """
     Calculates aggregate churn features and NEW detailed file-level changes.
@@ -44,13 +63,17 @@ def get_detailed_churn():
     features = {
         'src_churn': 0, 'files_added': 0, 'files_deleted': 0, 'files_modified': 0,
         'test_churn': 0, 'tests_added': 0, 'tests_deleted': 0, 'tests_modified': 0,
-        'changed_files_details': []  # <-- NEW: For detailed GenAI reporting
+        'changed_files_details': [],  # <-- NEW: For detailed GenAI reporting
+        'code_diff': ''  # <-- NEW: Actual code diff for explanation
     }
     
     # Get churn (lines added/deleted) per file
     numstat = run_command("git diff --numstat HEAD~1 HEAD")
     # Get change type (A, M, D, R) per file
     status = run_command("git diff --name-status HEAD~1 HEAD")
+    
+    # Get the actual code diff
+    features['code_diff'] = get_code_diff()
 
     # Create a lookup for {path: churn_amount}
     line_changes = {}
