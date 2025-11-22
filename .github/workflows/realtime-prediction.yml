@@ -54,9 +54,8 @@ jobs:
         env:
           PREDICTION_API_URL: ${{ secrets.PREDICTION_API_URL }} # ML Model URL
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        # NOTE: Pass 'predict' mode to the script
         run: |
-          python scripts/predict_realtime.py predict
+          python scripts/predict_realtime.py
           echo "result=$(cat prediction.txt)" >> "$GITHUB_OUTPUT"
       - name: Archive ML Payload
         uses: actions/upload-artifact@v4
@@ -95,9 +94,8 @@ jobs:
         env:
           PREDICTION_API_URL: ${{ secrets.GEN_AI_API_URL }}/predict # GenAI /predict URL
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        # NOTE: Pass 'predict' mode to the script
         run: |
-          python scripts/predict_realtime.py predict
+          python scripts/predict_realtime.py
           echo "result=$(cat prediction.txt)" >> "$GITHUB_OUTPUT"
       - name: Archive GenAI Payload
         uses: actions/upload-artifact@v4
@@ -114,16 +112,12 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-        with: { fetch-depth: 0 } # Fetch full history to run Python script locally
 
-      # Install Python dependencies needed for the explanation step
-      - name: Set up Python for Explanation
-        uses: actions/setup-python@v4
-        with: { python-version: '3.10' }
-      - name: Install Python Dependencies
-        run: pip install requests pandas numpy
-
-      # Download the payload file created by the prediction jobs
+      # Install JQ, which is needed for JSON parsing in the explanation step
+      - name: Install Utility Dependencies (jq)
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq
+          
       - name: Download GenAI Payload
         id: download_payload
         if: needs.check_changes.outputs.should_predict == 'true'
@@ -132,24 +126,52 @@ jobs:
           name: genai-payload
           path: .
           
-      # REPLACED SHELL SCRIPT WITH PYTHON
-      - name: Get AI Explanation on Failure (Python)
+      - name: Get AI Explanation on Failure
         id: get_explanation
         if: |
           needs.check_changes.outputs.should_predict == 'true' &&
           needs.ml-api.outputs.prediction == 'Fail'
         env:
-          # This is the explanation endpoint
           EXPLAIN_API_URL: ${{ secrets.GEN_AI_API_URL }}/explain
-          # Pass the ML result so the script knows what to explain
-          ML_PREDICTION_RESULT: ${{ needs.ml-api.outputs.prediction }} 
         run: |
-          # Use the Python script in 'explain' mode
-          # It reads payload.json, calls the EXPLAIN_API_URL, and writes result to explanation.txt
-          python scripts/predict_realtime.py explain
+          echo "ML model predicted failure. Attempting to get explanation..."
           
-          # Read the explanation from the file and set as output
-          EXPLANATION=$(cat explanation.txt)
+          if [ ! -f payload.json ]; then
+            EXPLANATION="Internal Error: Explanation payload file (payload.json) was not found."
+          else
+            # Execute curl, saving the body to a temp file and printing the status code
+            TEMP_BODY_FILE="response_body.txt"
+            # Capture HTTP status code using -w "%{http_code}"
+            HTTP_STATUS=$(curl -sS -X POST -H "Content-Type: application/json" \
+              --data @payload.json "$EXPLAIN_API_URL" -o "$TEMP_BODY_FILE" -w "%{http_code}")
+              
+            RESPONSE_BODY=$(cat "$TEMP_BODY_FILE")
+            
+            # 💡 FIX: Use jq -n to safely construct a JSON error message, 
+            # preserving HTTP_STATUS and raw response body.
+            if [ "$HTTP_STATUS" -ge 400 ] || [ -z "$RESPONSE_BODY" ]; then
+              echo "Error: API returned status $HTTP_STATUS or empty response. Constructing safe error message."
+              RESPONSE_BODY=$(jq -n \
+                --arg status "$HTTP_STATUS" \
+                --arg raw_body "$RESPONSE_BODY" \
+                '{
+                  report: "API Failure",
+                  detail: "API Call failed with HTTP Status: \($status). Check Cloud Run logs for trace.",
+                  raw_response: $raw_body
+                }')
+            fi
+            
+            # Attempt to parse the response. This is now safer since we guarantee RESPONSE_BODY is valid JSON.
+            # We look for 'report', then 'detail', then provide a final fallback.
+            EXPLANATION=$(echo "$RESPONSE_BODY" | jq -r '.report // .detail // "Unknown error. Check the raw_response field in log payload."' 2>/dev/null)
+            
+            # If jq still failed for some reason, use a final hardcoded error
+            if [ $? -ne 0 ]; then
+                EXPLANATION="Critical JSON Parsing Error. Raw content: ${RESPONSE_BODY}"
+            fi
+
+            rm -f "$TEMP_BODY_FILE"
+          fi
 
           # Set the output variable using the multiline delimiter syntax
           echo "explanation<<EOF" >> "$GITHUB_OUTPUT"
@@ -212,7 +234,6 @@ jobs:
             echo "| 🤖 **ML Model** | \`$ML_RESULT\` |" >> body.txt
             echo "| 🧠 **GenAI Model** | \`$AI_RESULT\` |" >> body.txt
             if [ "$ML_RESULT" == "Fail" ]; then
-              # Note: If EXPLANATION is empty, it will be the error message returned by request_explanation
               EXPLANATION="${AI_EXPLANATION:-Unable to get explanation from the GenAI model.}"
               echo "" >> body.txt
               echo "**AI Explanation**: _${EXPLANATION}_" >> body.txt
