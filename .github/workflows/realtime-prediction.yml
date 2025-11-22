@@ -147,25 +147,27 @@ jobs:
               
             RESPONSE_BODY=$(cat "$TEMP_BODY_FILE")
             
-            echo "Received HTTP Status: $HTTP_STATUS"
-            echo "Response Body Preview: ${RESPONSE_BODY:0:200}"
+            # 💡 FIX: Use jq -n to safely construct a JSON error message, 
+            # preserving HTTP_STATUS and raw response body.
+            if [ "$HTTP_STATUS" -ge 400 ] || [ -z "$RESPONSE_BODY" ]; then
+              echo "Error: API returned status $HTTP_STATUS or empty response. Constructing safe error message."
+              RESPONSE_BODY=$(jq -n \
+                --arg status "$HTTP_STATUS" \
+                --arg raw_body "$RESPONSE_BODY" \
+                '{
+                  report: "API Failure",
+                  detail: "API Call failed with HTTP Status: \($status). Check Cloud Run logs for trace.",
+                  raw_response: $raw_body
+                }')
+            fi
             
-            # Check for success status codes (2xx)
-            if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
-              # Success - parse the explanation
-              EXPLANATION=$(echo "$RESPONSE_BODY" | jq -r '.report // .explanation // .detail // "Explanation not found in response."' 2>/dev/null)
-              
-              # If jq parsing failed, use raw response
-              if [ $? -ne 0 ] || [ -z "$EXPLANATION" ]; then
-                EXPLANATION="Raw API Response: ${RESPONSE_BODY}"
-              fi
-            else
-              # API returned an error status or empty response
-              echo "Error: API returned status $HTTP_STATUS. Using fallback explanation."
-              ERROR_DETAIL=$(echo "$RESPONSE_BODY" | jq -r '.error // .message // .detail // ""' 2>/dev/null)
-              
-              # Provide a generic but helpful fallback explanation
-              EXPLANATION="⚠️ Build Failure Risk Detected - The ML model has identified potential issues with this commit based on historical patterns. Common failure indicators include: Code Complexity (recent changes may have introduced increased complexity or modified critical paths), Test Coverage (changes to source files without corresponding test updates), Historical Patterns (similar code changes have previously resulted in build failures), and File Churn (multiple files modified simultaneously, increasing integration risk). Recommendation: Review the changed files carefully, ensure adequate test coverage, and verify all dependencies are properly configured before merging. Note: Detailed AI analysis temporarily unavailable."
+            # Attempt to parse the response. This is now safer since we guarantee RESPONSE_BODY is valid JSON.
+            # We look for 'report', then 'detail', then provide a final fallback.
+            EXPLANATION=$(echo "$RESPONSE_BODY" | jq -r '.report // .detail // "Unknown error. Check the raw_response field in log payload."' 2>/dev/null)
+            
+            # If jq still failed for some reason, use a final hardcoded error
+            if [ $? -ne 0 ]; then
+                EXPLANATION="Critical JSON Parsing Error. Raw content: ${RESPONSE_BODY}"
             fi
 
             rm -f "$TEMP_BODY_FILE"
