@@ -114,6 +114,17 @@ public class Board extends JPanel implements ActionListener {
         }        
     }
 
+    private void gameOver(Graphics g) {
+        
+        String msg = "Game Over";
+        Font small = new Font("Helvetica", Font.BOLD, 14);
+        FontMetrics metr = getFontMetrics(small);
+
+        g.setColor(Color.white);
+        g.setFont(small);
+        g.drawString(msg, (B_WIDTH - metr.stringWidth(msg)) / 2, B_HEIGHT / 2);
+    }
+
     private void checkApple() {
 
         if ((x[0] == apple_x) && (y[0] == apple_y)) {
@@ -185,6 +196,7 @@ public class Board extends JPanel implements ActionListener {
         r = (int) (Math.random() * RAND_POS);
         apple_y = ((r * DOT_SIZE));
     }
+
     @Override
     public void actionPerformed(ActionEvent e) {
 
@@ -197,7 +209,6 @@ public class Board extends JPanel implements ActionListener {
 
         repaint();
     }
-
 
     private class TAdapter extends KeyAdapter {
 
