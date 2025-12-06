@@ -149,22 +149,30 @@ jobs:
             
             # 💡 FIX: Use jq -n to safely construct a JSON error message, 
             # preserving HTTP_STATUS and raw response body.
-            if [ "$HTTP_STATUS" -ge 400 ] || [ -z "$RESPONSE_BODY" ]; then
-              echo "Error: API returned status $HTTP_STATUS or empty response. Constructing safe error message."
-              RESPONSE_BODY=$(jq -n \
-                --arg status "$HTTP_STATUS" \
-                --arg raw_body "$RESPONSE_BODY" \
-                '{
-                  report: "API Failure",
-                  detail: "API Call failed with HTTP Status: \($status). Check Cloud Run logs for trace.",
-                  raw_response: $raw_body
-                }')
+            # Extract errors from payload if present
+            BUILD_ERRORS=$(jq -r '.errors[]? // empty' payload.json 2>/dev/null)
+
+            if [ -n "$BUILD_ERRORS" ]; then
+                echo "explanation<<EOF" >> "$GITHUB_OUTPUT"
+                echo "Build likely to fail due to: $BUILD_ERRORS" >> "$GITHUB_OUTPUT"
+                echo "EOF" >> "$GITHUB_OUTPUT"
+                exit 0
             fi
+
             
             # Attempt to parse the response. This is now safer since we guarantee RESPONSE_BODY is valid JSON.
             # We look for 'report', then 'detail', then provide a final fallback.
-            EXPLANATION=$(echo "$RESPONSE_BODY" | jq -r '.report // .detail // "Unknown error. Check the raw_response field in log payload."' 2>/dev/null)
-            
+            # First try an explicit AI explanation
+            EXPLANATION=$(echo "$RESPONSE_BODY" | jq -r '
+              .explanation // 
+              .summary // 
+              .reason // 
+              .root_cause // 
+              .report // 
+              .detail // 
+              "No explanation available, but ML model flagged risk."
+            ' 2>/dev/null)
+
             # If jq still failed for some reason, use a final hardcoded error
             if [ $? -ne 0 ]; then
                 EXPLANATION="Critical JSON Parsing Error. Raw content: ${RESPONSE_BODY}"
