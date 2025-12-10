@@ -85,7 +85,13 @@ public class Board extends JPanel implements ActionListener {
         timer.start();
     }
 
+    @Override
+    public void paintComponent(Graphics g) {
+        super.paintComponent(g);
 
+        doDrawing(g);
+    }
+    
     private void doDrawing(Graphics g) {
         
         if (inGame) {
